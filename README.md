@@ -1,4 +1,4 @@
-# NYC HVFHV serverless lakehouse
+# NYC HVFHV AWS lakehouse
 
 This repository is a production-shaped, cost-bounded AWS data engineering
 project for monthly NYC ride-hailing data. It turns one immutable source month
@@ -11,7 +11,15 @@ and serving that a larger production platform would use.
 
 ## Architecture
 
-<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/efe91dde-c03a-4ffa-8ba4-295e4e37c9a3" />
+```text
+upstream S3 landing
+        -> MWAA / Airflow 3
+        -> transient EMR on EC2 (On-Demand Primary + Spot Core)
+        -> S3 Iceberg + Glue Data Catalog
+        -> Redshift Serverless / Spectrum
+        -> Cosmos + dbt managed Gold
+        -> reconcile -> publish -> verify
+```
 
 The main responsibilities are deliberately explicit:
 
@@ -19,24 +27,25 @@ The main responsibilities are deliberately explicit:
 | --- | --- |
 | S3 landing | Holds immutable monthly source files supplied by the upstream producer. |
 | Amazon MWAA / Airflow | Coordinates the monthly workflow, dependencies, retries, and reruns. |
-| EMR Serverless + Spark | Reads the source, creates Bronze, and produces validated Silver and quarantine records. |
+| Transient EMR on EC2 + Spark | Creates one short-lived cluster per monthly run; it reads the source, creates Bronze, and produces validated Silver and quarantine records. The primary node is On-Demand and the single Core worker uses Spot with provisioning fallback. |
 | S3 + Apache Iceberg | Stores the canonical open Bronze, Silver, quarantine, and operational tables with transactional snapshots. |
 | AWS Glue Data Catalog | Makes Iceberg metadata available to EMR and Redshift; it is not an ETL engine in this project. |
 | Redshift Serverless + Spectrum | Reads Silver from the lakehouse and serves managed Gold tables through one SQL query plane. |
 | Cosmos + dbt-redshift | Runs the dbt model and test graph under Airflow orchestration to build Gold. |
 | Publication manifest | Records the exact source, Iceberg snapshots, dbt result, and row counts accepted for a published month. |
 
-There is no Athena query path and no AWS Glue ETL job. EMR Serverless is the
-only Spark compute path, while Redshift is the analytical serving path.
+There is no Athena query path and no AWS Glue ETL job. Transient EMR on EC2 is
+the only Spark compute path, while Redshift is the analytical serving path.
 
 ## How one monthly run works
 
 1. The upstream producer lands the trip Parquet file and taxi-zone reference
    file in S3 with their SHA-256 metadata. This repository starts from that
    landing contract; it does not download or upload source data.
-2. Airflow identifies the immutable source and starts the Bronze Spark job on
-   EMR Serverless. Bronze preserves the accepted source rows and records the
-   source run.
+2. Airflow identifies the immutable source, creates one transient EMR cluster,
+   and submits Bronze. Bronze preserves the accepted source rows and records
+   the source run. The same cluster then runs Silver; Airflow requests its
+   termination before dbt starts.
 3. A second Spark job validates and deterministically deduplicates Bronze.
    Valid rows go to Silver; rejected rows go to quarantine with a reason.
 4. Redshift Spectrum reads the Silver Iceberg table through Glue Data Catalog.
@@ -66,6 +75,9 @@ large framework:
 
 Detailed field-level rules, state transitions, and failure behavior live in
 [runtime semantics](docs/SEMANTICS.md).
+
+To learn the implementation end to end and verify that you can safely operate
+and change it, follow the [codebase ownership and acceptance guide](docs/CODEBASE_OWNERSHIP_GUIDE.md).
 
 ## Gold data product
 
@@ -119,7 +131,7 @@ covers resource removal.
 ## Verification status
 
 Local tests validate code, contracts, packaging, dbt parsing, and Terraform
-configuration. They do not prove a live AWS deployment. MWAA, S3, EMR
-Serverless, Iceberg commits, Redshift Serverless/Spectrum, rerun behavior,
+configuration. They do not prove a live AWS deployment. MWAA, S3, transient
+EMR on EC2, Iceberg commits, Redshift Serverless/Spectrum, rerun behavior,
 schema evolution, and teardown remain **NOT VERIFIED** until the project
 retains evidence from a bounded end-to-end AWS run.

@@ -11,8 +11,8 @@ TB/PB performance benchmark.
 Upstream producer
   -> immutable S3 landing
   -> regular MWAA (Airflow 3)
-  -> EMR Serverless / PySpark Bronze
-  -> EMR Serverless / PySpark Silver + quarantine
+  -> transient EMR on EC2 / PySpark Bronze
+  -> transient EMR on EC2 / PySpark Silver + quarantine
   -> S3 Iceberg + Glue Data Catalog
   -> Redshift Serverless external schemas
   -> dbt-redshift managed Gold
@@ -27,7 +27,7 @@ Upstream producer
 | --- | --- | --- |
 | Input | Upstream producer + S3 | Land immutable objects and SHA-256 metadata |
 | Control plane | regular MWAA | Ordering, retry, rerun, backfill, task evidence |
-| Batch compute | EMR Serverless | Bronze and Silver/quarantine Spark work |
+| Batch compute | transient EMR on EC2 | Bronze and Silver/quarantine Spark work; Primary On-Demand and bounded Core Spot |
 | Open storage | S3 + Iceberg | ACID Bronze, Silver, quarantine, operational state |
 | Shared metadata | Glue Data Catalog | Metadata only; one catalog shared by EMR and Spectrum |
 | Gold transform | Cosmos Watcher + dbt-redshift | One build, model/test visibility, six managed Redshift relations |
@@ -100,8 +100,10 @@ The monthly DAG is:
 
 ```text
 prepare_month
--> bronze_ingestion_emr
--> silver_transform_emr
+-> create_emr_cluster
+-> bronze_ingestion_emr -> bronze_ingestion_complete
+-> silver_transform_emr -> silver_transform_complete
+-> terminate_emr_cluster
 -> dbt_build
 -> dbt_result_artifact
 -> reconciliation
@@ -146,9 +148,10 @@ Verification is intentionally small:
 
 ## Deployment boundary
 
-Terraform defines one private regular MWAA environment, one auto-stopping EMR
-Serverless application, one Redshift Serverless namespace/workgroup, one
-private S3 bucket, three Glue Data Catalog namespaces, and IAM boundaries.
+Terraform defines one private regular MWAA environment, the EMR service and
+EC2 runtime roles for transient clusters, one Redshift Serverless
+namespace/workgroup, one private S3 bucket, three Glue Data Catalog namespaces,
+and IAM boundaries. Each cluster is created by the DAG, not Terraform.
 
 Regular MWAA is provisioned and does not scale to zero. `mw1.small`, two maximum
 workers, and the separately approved teardown plan bound the baseline cost.
@@ -164,7 +167,7 @@ Iceberg maintenance suite is part of the baseline.
 
 The sole post-baseline semantic is adding nullable `cbd_congestion_fee` for
 2025, ingesting a new snapshot, and querying the retained 2024 snapshot with
-one bounded EMR Serverless Spark verification job.
+one bounded transient EMR Spark verification job.
 
 `CODEBASE-READY` requires all credential-independent checks to pass.
 `DEPLOYMENT-VERIFIED` remains **NOT VERIFIED** until a real bounded AWS run

@@ -34,7 +34,7 @@ def verify(
     clients = clients or {
         service: boto3.client(service, region_name=region)
         for service in (
-            "emr-serverless",
+            "emr",
             "glue",
             "iam",
             "mwaa",
@@ -56,10 +56,19 @@ def verify(
         "EMPTY" if objects.get("KeyCount", 0) == 0 else "PRESENT"
     )
 
-    applications = clients["emr-serverless"].list_applications().get("applications", [])
-    result["emr_serverless_application"] = (
+    active_clusters = (
+        clients["emr"]
+        .list_clusters(
+            ClusterStates=["STARTING", "BOOTSTRAPPING", "RUNNING", "WAITING"]
+        )
+        .get("Clusters", [])
+    )
+    result["transient_emr_cluster"] = (
         "PRESENT"
-        if any(app.get("name") == f"{prefix}-spark" for app in applications)
+        if any(
+            cluster.get("Name", "").startswith("nyc-hvfhs-")
+            for cluster in active_clusters
+        )
         else "ABSENT"
     )
 
@@ -86,7 +95,8 @@ def verify(
 
     for kind, name in (
         ("mwaa_role", f"{prefix}-mwaa"),
-        ("emr_serverless_role", f"{prefix}-emr-serverless"),
+        ("emr_service_role", f"{prefix}-emr-service"),
+        ("emr_ec2_role", f"{prefix}-emr-ec2"),
         ("redshift_spectrum_role", f"{prefix}-redshift-spectrum"),
     ):
         try:
@@ -115,8 +125,9 @@ def main() -> None:
     expected_absent = [
         result["mwaa_environment"],
         result["mwaa_role"],
-        result["emr_serverless_role"],
-        result["emr_serverless_application"],
+        result["emr_service_role"],
+        result["emr_ec2_role"],
+        result["transient_emr_cluster"],
         result["redshift_workgroup"],
         result["redshift_spectrum_role"],
     ]

@@ -8,7 +8,12 @@ import re
 from urllib.parse import urlparse
 
 import boto3
-from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+from airflow.providers.amazon.aws.operators.emr import (
+    EmrAddStepsOperator,
+    EmrCreateJobFlowOperator,
+    EmrTerminateJobFlowOperator,
+)
+from airflow.providers.amazon.aws.sensors.emr import EmrStepSensor
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, Param, Variable
@@ -47,46 +52,104 @@ DEFAULT_ARGS = {
     "email_on_retry": False,
 }
 
-EMR_APPLICATION_ID = "{{ var.value.nyc_emr_serverless_application_id }}"
-EMR_EXECUTION_ROLE_ARN = "{{ var.value.nyc_emr_serverless_execution_role_arn }}"
 EMR_SCRIPT_PREFIX_URI = "{{ var.value.nyc_spark_script_prefix_uri }}"
 EMR_PACKAGE_URI = "{{ var.value.nyc_spark_package_uri }}"
-EMR_LOG_URI = "{{ var.value.nyc_emr_serverless_log_uri }}"
+EMR_LOG_URI = "{{ var.value.nyc_emr_log_uri }}"
+EMR_SERVICE_ROLE_ARN = "{{ var.value.nyc_emr_service_role_arn }}"
+EMR_EC2_INSTANCE_PROFILE = "{{ var.value.nyc_emr_ec2_instance_profile }}"
+EMR_SUBNET_IDS = "{{ var.json.nyc_emr_subnet_ids }}"
 
 
-def _emr_spark_job(script_name: str, arguments: list[str]) -> dict[str, object]:
+def _spark_submit_command(script_name: str, arguments: list[str]) -> str:
+    """Build the one Spark submit command shared by the transient EMR steps."""
+
+    quoted_arguments = " ".join(arguments)
+    return (
+        "spark-submit "
+        f"--py-files {EMR_PACKAGE_URI} "
+        "--conf spark.jars=/usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar "
+        "--conf spark.driver.cores=1 "
+        "--conf spark.driver.memory=3g "
+        "--conf spark.executor.cores=1 "
+        "--conf spark.executor.memory=3g "
+        "--conf spark.dynamicAllocation.initialExecutors=1 "
+        "--conf spark.dynamicAllocation.maxExecutors=3 "
+        "--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions "
+        "--conf spark.sql.defaultCatalog=glue_catalog "
+        "--conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog "
+        "--conf spark.sql.catalog.glue_catalog.warehouse={{ var.value.nyc_warehouse_uri }} "
+        "--conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog "
+        "--conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO "
+        f"{EMR_SCRIPT_PREFIX_URI}/{script_name} {quoted_arguments}"
+    )
+
+
+def _emr_step(script_name: str, arguments: list[str]) -> dict[str, object]:
     return {
-        "application_id": EMR_APPLICATION_ID,
-        "execution_role_arn": EMR_EXECUTION_ROLE_ARN,
-        "job_driver": {
-            "sparkSubmit": {
-                "entryPoint": f"{EMR_SCRIPT_PREFIX_URI}/{script_name}",
-                "entryPointArguments": arguments,
-                "sparkSubmitParameters": (
-                    f"--py-files {EMR_PACKAGE_URI} "
-                    "--conf spark.jars=/usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar "
-                    "--conf spark.driver.cores=1 "
-                    "--conf spark.driver.memory=3g "
-                    "--conf spark.executor.cores=1 "
-                    "--conf spark.executor.memory=3g "
-                    "--conf spark.dynamicAllocation.initialExecutors=1 "
-                    "--conf spark.dynamicAllocation.maxExecutors=3 "
-                    "--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions "
-                    "--conf spark.sql.defaultCatalog=glue_catalog "
-                    "--conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog "
-                    "--conf spark.sql.catalog.glue_catalog.warehouse={{ var.value.nyc_warehouse_uri }} "
-                    "--conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog "
-                    "--conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO"
-                ),
-            }
+        "Name": script_name.removesuffix(".py"),
+        "ActionOnFailure": "TERMINATE_CLUSTER",
+        "HadoopJarStep": {
+            "Jar": "command-runner.jar",
+            "Args": ["bash", "-c", _spark_submit_command(script_name, arguments)],
         },
-        "configuration_overrides": {
-            "monitoringConfiguration": {
-                "s3MonitoringConfiguration": {"logUri": EMR_LOG_URI}
+    }
+
+
+def _emr_job_flow() -> dict[str, object]:
+    """Return the small, single-run EMR cluster specification.
+
+    The primary node is deliberately On-Demand. The one-worker core fleet uses
+    capacity-aware Spot and falls back only while the cluster is provisioning.
+    Each Spark step requests cluster termination on failure; the idle policy is
+    a second guard if orchestration is interrupted before a step is submitted.
+    """
+
+    return {
+        "Name": "nyc-hvfhs-{{ ti.xcom_pull(task_ids='prepare_month')['run_id'] }}",
+        "ReleaseLabel": "emr-6.15.0",
+        "Applications": [{"Name": "Spark"}],
+        "LogUri": EMR_LOG_URI,
+        "VisibleToAllUsers": True,
+        "ServiceRole": EMR_SERVICE_ROLE_ARN,
+        "JobFlowRole": EMR_EC2_INSTANCE_PROFILE,
+        "Tags": [
+            {
+                "Key": "for-use-with-amazon-emr-managed-policies",
+                "Value": "true",
             }
+        ],
+        "AutoTerminationPolicy": {"IdleTimeout": 900},
+        "Instances": {
+            "KeepJobFlowAliveWhenNoSteps": True,
+            "TerminationProtected": False,
+            "Ec2SubnetIds": EMR_SUBNET_IDS,
+            "InstanceFleets": [
+                {
+                    "Name": "Primary On-Demand",
+                    "InstanceFleetType": "MASTER",
+                    "TargetOnDemandCapacity": 1,
+                    "InstanceTypeConfigs": [
+                        {"InstanceType": "m5.xlarge", "WeightedCapacity": 1}
+                    ],
+                },
+                {
+                    "Name": "Core Spot",
+                    "InstanceFleetType": "CORE",
+                    "TargetSpotCapacity": 1,
+                    "InstanceTypeConfigs": [
+                        {"InstanceType": "m5.xlarge", "WeightedCapacity": 1},
+                        {"InstanceType": "m5a.xlarge", "WeightedCapacity": 1},
+                    ],
+                    "LaunchSpecifications": {
+                        "SpotSpecification": {
+                            "TimeoutDurationMinutes": 10,
+                            "TimeoutAction": "SWITCH_TO_ON_DEMAND",
+                            "AllocationStrategy": "price-capacity-optimized",
+                        }
+                    },
+                },
+            ],
         },
-        "aws_conn_id": None,
-        "wait_for_completion": True,
     }
 
 
@@ -164,44 +227,84 @@ with DAG(
         op_kwargs={"year": "{{ params.year }}", "month": "{{ params.month }}"},
     )
 
-    bronze_ingestion = EmrServerlessStartJobOperator(
-        task_id="bronze_ingestion_emr",
-        **_emr_spark_job(
-            "nyc_bronze_ingestion.py",
-            [
-                "--SOURCE_URI",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_uri'] }}",
-                "--SOURCE_YEAR",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_year'] }}",
-                "--SOURCE_MONTH",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_month'] }}",
-                "--SOURCE_CHECKSUM",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_checksum'] }}",
-                "--INGESTION_RUN_ID",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['run_id'] }}",
-                "--TAXI_ZONE_URI",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['taxi_zone_uri'] }}",
-                "--TAXI_ZONE_CHECKSUM",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['taxi_zone_checksum'] }}",
-                "--SOURCE_SIZE_BYTES",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_size_bytes'] }}",
-            ],
-        ),
+    create_emr_cluster = EmrCreateJobFlowOperator(
+        task_id="create_emr_cluster",
+        job_flow_overrides=_emr_job_flow(),
+        aws_conn_id=None,
+        retries=0,
     )
 
-    silver_transform = EmrServerlessStartJobOperator(
+    bronze_ingestion = EmrAddStepsOperator(
+        task_id="bronze_ingestion_emr",
+        job_flow_id="{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        steps=[
+            _emr_step(
+                "nyc_bronze_ingestion.py",
+                [
+                    "--SOURCE_URI",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_uri'] }}",
+                    "--SOURCE_YEAR",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_year'] }}",
+                    "--SOURCE_MONTH",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_month'] }}",
+                    "--SOURCE_CHECKSUM",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_checksum'] }}",
+                    "--INGESTION_RUN_ID",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['run_id'] }}",
+                    "--TAXI_ZONE_URI",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['taxi_zone_uri'] }}",
+                    "--TAXI_ZONE_CHECKSUM",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['taxi_zone_checksum'] }}",
+                    "--SOURCE_SIZE_BYTES",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_size_bytes'] }}",
+                ],
+            )
+        ],
+        aws_conn_id=None,
+        retries=0,
+    )
+
+    bronze_complete = EmrStepSensor(
+        task_id="bronze_ingestion_complete",
+        job_flow_id="{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        step_id="{{ ti.xcom_pull(task_ids='bronze_ingestion_emr')[0] }}",
+        aws_conn_id=None,
+        retries=0,
+    )
+
+    silver_transform = EmrAddStepsOperator(
         task_id="silver_transform_emr",
-        **_emr_spark_job(
-            "nyc_silver_transform.py",
-            [
-                "--SOURCE_YEAR",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_year'] }}",
-                "--SOURCE_MONTH",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['source_month'] }}",
-                "--INGESTION_RUN_ID",
-                "{{ ti.xcom_pull(task_ids='prepare_month')['run_id'] }}",
-            ],
-        ),
+        job_flow_id="{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        steps=[
+            _emr_step(
+                "nyc_silver_transform.py",
+                [
+                    "--SOURCE_YEAR",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_year'] }}",
+                    "--SOURCE_MONTH",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['source_month'] }}",
+                    "--INGESTION_RUN_ID",
+                    "{{ ti.xcom_pull(task_ids='prepare_month')['run_id'] }}",
+                ],
+            )
+        ],
+        aws_conn_id=None,
+        retries=0,
+    )
+
+    silver_complete = EmrStepSensor(
+        task_id="silver_transform_complete",
+        job_flow_id="{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        step_id="{{ ti.xcom_pull(task_ids='silver_transform_emr')[0] }}",
+        aws_conn_id=None,
+        retries=0,
+    )
+
+    terminate_emr_cluster = EmrTerminateJobFlowOperator(
+        task_id="terminate_emr_cluster",
+        job_flow_id="{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        aws_conn_id=None,
+        retries=0,
     )
 
     dbt_build = DbtTaskGroup(
@@ -292,8 +395,12 @@ with DAG(
 
     (
         prepare_month
+        >> create_emr_cluster
         >> bronze_ingestion
+        >> bronze_complete
         >> silver_transform
+        >> silver_complete
+        >> terminate_emr_cluster
         >> dbt_build
         >> dbt_result_artifact
         >> reconciliation

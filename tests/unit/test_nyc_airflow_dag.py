@@ -84,7 +84,15 @@ def _fake_airflow_modules(monkeypatch):
             TriggerDagRunOperator=FakeOperator
         ),
         "airflow.providers.amazon.aws.operators.emr": types.SimpleNamespace(
-            EmrServerlessStartJobOperator=FakeOperator
+            EmrAddStepsOperator=FakeOperator,
+            EmrCreateJobFlowOperator=FakeOperator,
+            EmrTerminateJobFlowOperator=FakeOperator,
+        ),
+        "airflow.providers.amazon.aws.sensors": fake_package(
+            "airflow.providers.amazon.aws.sensors"
+        ),
+        "airflow.providers.amazon.aws.sensors.emr": types.SimpleNamespace(
+            EmrStepSensor=FakeOperator
         ),
         "cosmos": types.SimpleNamespace(DbtTaskGroup=FakeDbtTaskGroup),
         "cosmos.config": types.SimpleNamespace(
@@ -114,8 +122,12 @@ def test_airflow_dag_import_and_manual_topology(monkeypatch) -> None:
     assert monthly.dag_id == "nyc_hvfhs_monthly"
     assert [task.task_id for task in monthly.tasks] == [
         "prepare_month",
+        "create_emr_cluster",
         "bronze_ingestion_emr",
+        "bronze_ingestion_complete",
         "silver_transform_emr",
+        "silver_transform_complete",
+        "terminate_emr_cluster",
         "dbt_build",
         "dbt_result_artifact",
         "reconciliation",
@@ -125,26 +137,41 @@ def test_airflow_dag_import_and_manual_topology(monkeypatch) -> None:
     assert monthly.params["year"].default == 2024
     assert monthly.params["month"].default == 1
     assert set(monthly.params) == {"year", "month"}
-    assert monthly.tasks[0].downstream_task_ids == {"bronze_ingestion_emr"}
-    assert monthly.tasks[1].downstream_task_ids == {"silver_transform_emr"}
-    assert all(monthly.tasks[index].kwargs["aws_conn_id"] is None for index in (1, 2))
+    assert monthly.tasks[0].downstream_task_ids == {"create_emr_cluster"}
+    assert monthly.tasks[1].downstream_task_ids == {"bronze_ingestion_emr"}
+    assert monthly.tasks[2].downstream_task_ids == {"bronze_ingestion_complete"}
+    assert monthly.tasks[3].downstream_task_ids == {"silver_transform_emr"}
+    assert monthly.tasks[4].downstream_task_ids == {"silver_transform_complete"}
+    assert monthly.tasks[5].downstream_task_ids == {"terminate_emr_cluster"}
+    assert monthly.tasks[6].downstream_task_ids == {"dbt_build"}
     assert all(
-        monthly.tasks[index].kwargs["application_id"]
-        == "{{ var.value.nyc_emr_serverless_application_id }}"
-        for index in (1, 2)
+        monthly.tasks[index].kwargs["aws_conn_id"] is None for index in range(1, 7)
     )
-    assert monthly.tasks[2].downstream_task_ids == {"dbt_build"}
-    assert monthly.tasks[3].downstream_task_ids == {"dbt_result_artifact"}
-    assert monthly.tasks[4].downstream_task_ids == {"reconciliation"}
-    assert monthly.tasks[5].downstream_task_ids == {"publication_manifest"}
-    assert monthly.tasks[6].downstream_task_ids == {"verification"}
+    assert all(monthly.tasks[index].kwargs["retries"] == 0 for index in range(1, 7))
+    job_flow = monthly.tasks[1].kwargs["job_flow_overrides"]
+    assert job_flow["AutoTerminationPolicy"] == {"IdleTimeout": 900}
+    assert job_flow["Tags"] == [
+        {"Key": "for-use-with-amazon-emr-managed-policies", "Value": "true"}
+    ]
+    assert job_flow["Instances"]["InstanceFleets"][0]["TargetOnDemandCapacity"] == 1
+    spot_fleet = job_flow["Instances"]["InstanceFleets"][1]
+    assert spot_fleet["TargetSpotCapacity"] == 1
+    assert spot_fleet["LaunchSpecifications"]["SpotSpecification"] == {
+        "TimeoutDurationMinutes": 10,
+        "TimeoutAction": "SWITCH_TO_ON_DEMAND",
+        "AllocationStrategy": "price-capacity-optimized",
+    }
+    assert monthly.tasks[7].downstream_task_ids == {"dbt_result_artifact"}
+    assert monthly.tasks[8].downstream_task_ids == {"reconciliation"}
+    assert monthly.tasks[9].downstream_task_ids == {"publication_manifest"}
+    assert monthly.tasks[10].downstream_task_ids == {"verification"}
     assert all(
-        "trigger_rule" not in monthly.tasks[index].kwargs for index in (4, 5, 6, 7)
+        "trigger_rule" not in monthly.tasks[index].kwargs for index in (8, 9, 10, 11)
     )
-    assert monthly.tasks[5].kwargs["python_callable"].__name__ == "reconcile_month"
-    assert monthly.tasks[6].kwargs["python_callable"].__name__ == "publish_month"
-    assert monthly.tasks[7].kwargs["python_callable"].__name__ == "verify_month"
-    dbt_group = monthly.tasks[3]
+    assert monthly.tasks[9].kwargs["python_callable"].__name__ == "reconcile_month"
+    assert monthly.tasks[10].kwargs["python_callable"].__name__ == "publish_month"
+    assert monthly.tasks[11].kwargs["python_callable"].__name__ == "verify_month"
+    dbt_group = monthly.tasks[7]
     assert dbt_group.kwargs["project_config"].kwargs["dbt_project_path"].name == (
         "dbt_project"
     )

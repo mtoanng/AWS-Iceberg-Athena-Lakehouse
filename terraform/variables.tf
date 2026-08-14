@@ -63,19 +63,8 @@ variable "redshift_database_name" {
 
 variable "spark_package_s3_key" {
   type        = string
-  description = "S3 key for the shared EMR Serverless Python package."
+  description = "S3 key for the shared transient EMR Python package."
   default     = "spark_jobs/nyc_spark_jobs.zip"
-}
-
-variable "emr_serverless_idle_timeout_minutes" {
-  type        = number
-  description = "Idle minutes before the persistent EMR Serverless application stops."
-  default     = 15
-
-  validation {
-    condition     = var.emr_serverless_idle_timeout_minutes >= 1 && var.emr_serverless_idle_timeout_minutes <= 60
-    error_message = "emr_serverless_idle_timeout_minutes must be between 1 and 60."
-  }
 }
 
 variable "vpc_id" {

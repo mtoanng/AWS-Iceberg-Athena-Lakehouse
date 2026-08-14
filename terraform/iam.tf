@@ -1,76 +1,3 @@
-resource "aws_iam_role" "emr_serverless_execution" {
-  name = "${var.project_name}-${var.environment}-emr-serverless"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "emr-serverless.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "emr_serverless_lakehouse" {
-  name = "${var.project_name}-${var.environment}-lakehouse-access"
-  role = aws_iam_role.emr_serverless_execution.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "BucketLocation"
-        Effect   = "Allow"
-        Action   = ["s3:GetBucketLocation", "s3:ListBucket"]
-        Resource = aws_s3_bucket.lakehouse.arn
-      },
-      {
-        Sid    = "ReadSourceReferenceAndArtifacts"
-        Effect = "Allow"
-        Action = ["s3:GetObject"]
-        Resource = [
-          "${aws_s3_bucket.lakehouse.arn}/${var.landing_prefix}/*",
-          "${aws_s3_bucket.lakehouse.arn}/${var.reference_prefix}/*",
-          "${aws_s3_bucket.lakehouse.arn}/spark_jobs/*"
-        ]
-      },
-      {
-        Sid    = "ManageCanonicalTablesAndLogs"
-        Effect = "Allow"
-        Action = [
-          "s3:AbortMultipartUpload",
-          "s3:DeleteObject",
-          "s3:GetObject",
-          "s3:ListMultipartUploadParts",
-          "s3:PutObject"
-        ]
-        Resource = [
-          "${aws_s3_bucket.lakehouse.arn}/${var.warehouse_prefix}/*",
-          "${aws_s3_bucket.lakehouse.arn}/tmp/*",
-          "${aws_s3_bucket.lakehouse.arn}/emr-serverless-logs/*"
-        ]
-      },
-      {
-        Sid    = "GlueCatalogIcebergMetadata"
-        Effect = "Allow"
-        Action = [
-          "glue:BatchCreatePartition",
-          "glue:BatchDeletePartition",
-          "glue:BatchGetPartition",
-          "glue:CreateDatabase",
-          "glue:CreateTable",
-          "glue:DeleteTable",
-          "glue:GetDatabase",
-          "glue:GetTable",
-          "glue:GetTables",
-          "glue:UpdateTable"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
 resource "aws_iam_role" "mwaa_execution" {
   name = "${var.project_name}-${var.environment}-mwaa"
 
@@ -167,10 +94,16 @@ resource "aws_iam_role_policy" "mwaa_pipeline" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "StartAndObserveEmrServerlessJobs"
-        Effect   = "Allow"
-        Action   = ["emr-serverless:StartJobRun", "emr-serverless:GetJobRun", "emr-serverless:CancelJobRun", "emr-serverless:GetApplication"]
-        Resource = aws_emrserverless_application.spark.arn
+        Sid    = "CreateAndObserveTransientEmrClusters"
+        Effect = "Allow"
+        Action = [
+          "elasticmapreduce:AddJobFlowSteps",
+          "elasticmapreduce:DescribeCluster",
+          "elasticmapreduce:DescribeStep",
+          "elasticmapreduce:RunJobFlow",
+          "elasticmapreduce:TerminateJobFlows"
+        ]
+        Resource = "*"
       },
       {
         Sid    = "ConnectToRedshiftServerlessForDbt"
@@ -188,12 +121,38 @@ resource "aws_iam_role_policy" "mwaa_pipeline" {
         Resource = "*"
       },
       {
-        Sid      = "PassEmrServerlessRole"
+        Sid      = "PassEmrServiceRole"
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
-        Resource = aws_iam_role.emr_serverless_execution.arn
+        Resource = aws_iam_role.emr_service.arn
         Condition = {
-          StringEquals = { "iam:PassedToService" = "emr-serverless.amazonaws.com" }
+          StringLike = { "iam:PassedToService" = "elasticmapreduce.amazonaws.com*" }
+        }
+      },
+      {
+        Sid      = "PassEmrEc2Role"
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = aws_iam_role.emr_ec2.arn
+        Condition = {
+          StringLike = { "iam:PassedToService" = "ec2.amazonaws.com*" }
+        }
+      },
+      {
+        Sid    = "CreateEmrCleanupServiceLinkedRole"
+        Effect = "Allow"
+        Action = ["iam:CreateServiceLinkedRole"]
+        Resource = [
+          "arn:aws:iam::*:role/aws-service-role/elasticmapreduce.amazonaws.com*/AWSServiceRoleForEMRCleanup*",
+          "arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot"
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:AWSServiceName" = [
+              "elasticmapreduce.amazonaws.com",
+              "spot.amazonaws.com"
+            ]
+          }
         }
       },
       {

@@ -1,4 +1,4 @@
-"""Standard command-line parsing for EMR Serverless PySpark entrypoints."""
+"""Standard command-line parsing for transient EMR PySpark entrypoints."""
 
 from __future__ import annotations
 

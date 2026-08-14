@@ -42,9 +42,14 @@ def test_terraform_is_nyc_only_and_uses_mwaa_and_package_contract() -> None:
     assert "instacart" not in terraform.lower()
     assert 'resource "aws_mwaa_environment"' in terraform
     assert '"PUBLIC_AND_PRIVATE"' in terraform
-    assert "aws_iam_instance_profile" not in terraform
+    assert 'resource "aws_iam_instance_profile" "emr_ec2"' in terraform
     assert 'resource "aws_instance"' not in terraform
-    assert "aws_emrserverless_application" in terraform
+    assert "aws_emrserverless_application" not in terraform
+    assert "AmazonEMRServicePolicy_v2" in terraform
+    assert "AmazonElasticMapReduceforEC2Role" not in terraform
+    assert "aws_emr_cluster" not in terraform
+    assert 'resource "aws_ec2_tag" "emr_vpc"' in terraform
+    assert 'resource "aws_ec2_tag" "emr_private_subnet"' in terraform
     dag = (ROOT / "etl" / "dags" / "nyc_hvfhs_monthly_dag.py").read_text(
         encoding="utf-8"
     )
@@ -53,7 +58,7 @@ def test_terraform_is_nyc_only_and_uses_mwaa_and_package_contract() -> None:
     assert "spark.driver.cores=1" in dag
     assert "spark.executor.cores=1" in dag
     assert "spark.dynamicAllocation.maxExecutors=3" in dag
-    assert 'disk   = "80 GB"' in terraform
+    assert "emr-logs/*" in terraform
     assert '"etl/dbt_project/${path}"' in terraform
     assert '!startswith(path, "target/")' in terraform
     assert 'path != ".user.yml"' in terraform
@@ -86,7 +91,10 @@ def test_cloud_environment_has_no_static_key_contract() -> None:
     env = (ROOT / ".env.cloud.example").read_text(encoding="utf-8")
     assert "AWS_ACCESS_KEY_ID" not in env
     assert "AWS_SECRET_ACCESS_KEY" not in env
-    assert "AIRFLOW_VAR_NYC_EMR_SERVERLESS_APPLICATION_ID" in env
+    assert "AIRFLOW_VAR_NYC_EMR_SERVICE_ROLE_ARN" in env
+    assert "AIRFLOW_VAR_NYC_EMR_EC2_INSTANCE_PROFILE" in env
+    assert "AIRFLOW_VAR_NYC_EMR_SUBNET_IDS" in env
+    assert "EMR_SERVERLESS" not in env
     assert "AIRFLOW_VAR_REDSHIFT_WORKGROUP_NAME" in env
 
 

@@ -12,7 +12,7 @@ terraform -chdir=terraform show bounded-destroy.tfplan
 The targets remove cost-bearing control/compute/serving resources:
 
 - regular MWAA and its execution role;
-- EMR Serverless and its execution role;
+- transient EMR service/EC2 roles and instance profile;
 - Redshift Serverless and Spectrum role;
 - their security groups and inline policies.
 

@@ -1,1 +1,1 @@
-"""EMR Serverless Spark entrypoints for the canonical Iceberg layers."""
+"""Transient EMR Spark entrypoints for the canonical Iceberg layers."""

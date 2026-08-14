@@ -1,4 +1,4 @@
-"""Retry-safe EMR Serverless Bronze ingestion for one immutable NYC month."""
+"""Retry-safe transient EMR Bronze ingestion for one immutable NYC month."""
 
 from __future__ import annotations
 

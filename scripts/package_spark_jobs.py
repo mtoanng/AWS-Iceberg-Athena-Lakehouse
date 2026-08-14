@@ -1,8 +1,8 @@
-"""Build the deterministic shared Python artifact used by EMR Serverless jobs.
+"""Build the deterministic shared Python artifact used by transient EMR jobs.
 
 Usage: ``python scripts/package_spark_jobs.py --output build/nyc_spark_jobs.zip``.
 The resulting zip is uploaded to ``spark_jobs/nyc_spark_jobs.zip`` and supplied
-to EMR Serverless with Spark's ``--py-files`` argument.
+to EMR with Spark's ``--py-files`` argument.
 """
 
 from __future__ import annotations

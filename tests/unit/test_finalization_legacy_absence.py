@@ -46,7 +46,11 @@ def test_only_bronze_and_silver_are_monthly_emr_processing_jobs() -> None:
     dag = (ROOT / "etl" / "dags" / "nyc_hvfhs_monthly_dag.py").read_text(
         encoding="utf-8"
     )
-    assert dag.count("EmrServerlessStartJobOperator(") == 2
+    assert dag.count("EmrAddStepsOperator(") == 2
+    assert dag.count("EmrStepSensor(") == 2
+    assert "EmrCreateJobFlowOperator(" in dag
+    assert "EmrTerminateJobFlowOperator(" in dag
+    assert "EmrServerlessStartJobOperator" not in dag
     assert "bronze_ingestion_emr" in dag
     assert "silver_transform_emr" in dag
     assert "nyc_quality_checkpoint.py" not in dag

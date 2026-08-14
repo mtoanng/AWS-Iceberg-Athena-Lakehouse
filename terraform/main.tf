@@ -53,24 +53,24 @@ output "glue_database_name" {
   description = "Canonical Glue Catalog namespaces for the NYC lakehouse."
 }
 
-output "emr_serverless_application_id" {
-  value       = aws_emrserverless_application.spark.id
-  description = "Persistent EMR Serverless Spark application ID."
+output "emr_service_role_arn" {
+  value       = aws_iam_role.emr_service.arn
+  description = "EMR service role used by each transient Spark cluster."
 }
 
-output "emr_serverless_execution_role_arn" {
-  value       = aws_iam_role.emr_serverless_execution.arn
-  description = "EMR Serverless execution role ARN."
+output "emr_ec2_instance_profile" {
+  value       = aws_iam_instance_profile.emr_ec2.name
+  description = "EC2 instance profile used by each transient EMR cluster."
 }
 
 output "spark_script_prefix_uri" {
   value       = "s3://${aws_s3_bucket.lakehouse.id}/spark_jobs"
-  description = "S3 prefix for EMR Serverless PySpark entrypoints."
+  description = "S3 prefix for transient EMR PySpark entrypoints."
 }
 
 output "spark_package_uri" {
   value       = "s3://${aws_s3_bucket.lakehouse.id}/${var.spark_package_s3_key}"
-  description = "S3 URI for the shared EMR Serverless Python package."
+  description = "S3 URI for the shared EMR Python package."
 }
 
 output "redshift_serverless_host" {
@@ -106,19 +106,20 @@ output "publication_prefix_uri" {
 output "airflow_variables" {
   description = "Non-secret variables to import into regular MWAA before the first DAG run."
   value = {
-    nyc_landing_uri                       = "s3://${aws_s3_bucket.lakehouse.id}/${var.landing_prefix}"
-    nyc_taxi_zone_uri                     = "s3://${aws_s3_bucket.lakehouse.id}/${var.reference_prefix}/taxi_zone_lookup.csv"
-    nyc_emr_serverless_application_id     = aws_emrserverless_application.spark.id
-    nyc_emr_serverless_execution_role_arn = aws_iam_role.emr_serverless_execution.arn
-    nyc_spark_script_prefix_uri           = "s3://${aws_s3_bucket.lakehouse.id}/spark_jobs"
-    nyc_spark_package_uri                 = "s3://${aws_s3_bucket.lakehouse.id}/${var.spark_package_s3_key}"
-    nyc_emr_serverless_log_uri            = "s3://${aws_s3_bucket.lakehouse.id}/emr-serverless-logs"
-    nyc_warehouse_uri                     = "s3://${aws_s3_bucket.lakehouse.id}/${var.warehouse_prefix}"
-    nyc_publication_prefix_uri            = "s3://${aws_s3_bucket.lakehouse.id}/manifests"
-    redshift_host                         = aws_redshiftserverless_workgroup.gold.endpoint[0].address
-    redshift_database                     = aws_redshiftserverless_namespace.gold.db_name
-    redshift_workgroup_name               = aws_redshiftserverless_workgroup.gold.workgroup_name
-    aws_account_id                        = data.aws_caller_identity.current.account_id
-    aws_region                            = var.aws_region
+    nyc_landing_uri              = "s3://${aws_s3_bucket.lakehouse.id}/${var.landing_prefix}"
+    nyc_taxi_zone_uri            = "s3://${aws_s3_bucket.lakehouse.id}/${var.reference_prefix}/taxi_zone_lookup.csv"
+    nyc_spark_script_prefix_uri  = "s3://${aws_s3_bucket.lakehouse.id}/spark_jobs"
+    nyc_spark_package_uri        = "s3://${aws_s3_bucket.lakehouse.id}/${var.spark_package_s3_key}"
+    nyc_emr_log_uri              = "s3://${aws_s3_bucket.lakehouse.id}/emr-logs"
+    nyc_emr_service_role_arn     = aws_iam_role.emr_service.arn
+    nyc_emr_ec2_instance_profile = aws_iam_instance_profile.emr_ec2.name
+    nyc_emr_subnet_ids           = var.private_subnet_ids
+    nyc_warehouse_uri            = "s3://${aws_s3_bucket.lakehouse.id}/${var.warehouse_prefix}"
+    nyc_publication_prefix_uri   = "s3://${aws_s3_bucket.lakehouse.id}/manifests"
+    redshift_host                = aws_redshiftserverless_workgroup.gold.endpoint[0].address
+    redshift_database            = aws_redshiftserverless_namespace.gold.db_name
+    redshift_workgroup_name      = aws_redshiftserverless_workgroup.gold.workgroup_name
+    aws_account_id               = data.aws_caller_identity.current.account_id
+    aws_region                   = var.aws_region
   }
 }
